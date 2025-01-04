@@ -92,9 +92,17 @@ impl VisitMut for MatchVisitor {
 fn is_sorted_match_arms(expr_match: &syn::ExprMatch) -> Result<(), syn::Error> {
     let mut arm_names: Vec<(String, &syn::Path)> = Vec::new();
 
-    for arm in &expr_match.arms {
-        if let Some((full_path_str, path)) = extract_variant_from_pat(&arm.pat) {
-            arm_names.push((full_path_str, path));
+    for arm in expr_match.arms.iter() {
+        match extract_variant_from_pat(&arm.pat) {
+            Some((full_path_str, path)) => {
+                arm_names.push((full_path_str, path));
+            }
+            None => {
+                return Err(syn::Error::new_spanned(
+                    &arm.pat,
+                    "unsupported by #[sorted]",
+                ));
+            }
         }
     }
 
