@@ -90,19 +90,28 @@ impl VisitMut for MatchVisitor {
 }
 
 fn is_sorted_match_arms(expr_match: &syn::ExprMatch) -> Result<(), syn::Error> {
-    let mut arm_names: Vec<(String, &syn::Path)> = Vec::new();
+    let mut arm_names: Vec<(String, Span)> = Vec::new();
+    let mut underscore_index: Option<usize> = None;
 
-    for arm in expr_match.arms.iter() {
-        match extract_variant_from_pat(&arm.pat) {
-            Some((full_path_str, path)) => {
-                arm_names.push((full_path_str, path));
+    for (index, arm) in expr_match.arms.iter().enumerate() {
+        match &arm.pat {
+            syn::Pat::Wild(_) => {
+                if underscore_index.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &arm.pat,
+                        "multiple wildcard patterns are not supported by #[sorted]",
+                    ));
+                }
+                underscore_index = Some(index);
             }
-            None => {
-                return Err(syn::Error::new_spanned(
-                    &arm.pat,
-                    "unsupported by #[sorted]",
-                ));
-            }
+            _ => match extract_variant_from_pat(&arm.pat) {
+                Some((full_path_str, span)) => {
+                    arm_names.push((full_path_str, span));
+                }
+                None => {
+                    return Err(syn::Error::new_spanned(&arm.pat, "unsupported by #[sorted]"));
+                }
+            },
         }
     }
 
@@ -110,36 +119,92 @@ fn is_sorted_match_arms(expr_match: &syn::ExprMatch) -> Result<(), syn::Error> {
     for i in 0..arm_names.len() {
         for j in 0..i {
             if arm_names[i].0 < arm_names[j].0 {
-                return Err(syn::Error::new_spanned(
-                    arm_names[i].1,
-                    format!("{} should sort before {}", arm_names[i].0, arm_names[j].0),
-                ));
+                // バリアント名だけのスパンを指す
+                let span = arm_names[i].1;
+                let msg = format!("{} should sort before {}", arm_names[i].0, arm_names[j].0);
+                return Err(syn::Error::new(span, msg));
             }
+        }
+    }
+
+    // If there is a wildcard, checks if it is last (arms.len() - 1)
+    if let Some(u_index) = underscore_index {
+        if u_index != expr_match.arms.len() - 1 {
+            return Err(syn::Error::new_spanned(
+                &expr_match.arms[u_index].pat,
+                "the wildcard pattern `_` must be last",
+            ));
         }
     }
 
     Ok(())
 }
 
-fn extract_variant_from_pat(pat: &syn::Pat) -> Option<(String, &syn::Path)> {
+fn extract_variant_from_pat(pat: &syn::Pat) -> Option<(String, Span)> {
     match pat {
+        // Signle Identifier (Fmt, Io, RustFestなど)
+        syn::Pat::Ident(pat_ident) => {
+            let ident_str = pat_ident.ident.to_string();
+            let span = pat_ident.ident.span();
+            Some((ident_str, span))
+        }
+        // Path (Error::Fmt, SomeModule::Variant, etc.)
         syn::Pat::Path(pat_path) => {
             let segments = &pat_path.path.segments;
+            if segments.is_empty() {
+                return None;
+            }
             let full_path_str =
                 segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
-            Some((full_path_str, &pat_path.path))
+
+            // Split by number of segments
+            if segments.len() == 1 {
+                // If there is only a single segment, it is treated like ident
+                let span = segments[0].ident.span();
+                Some((full_path_str, span))
+            } else {
+                // More than 2 segment (Error::Fmt, etc...) wants to highlight the entire path
+                // pat_path.path.span() requires `use syn::spanned::Spanned;`
+                use syn::spanned::Spanned;
+                let span = pat_path.path.span();
+                Some((full_path_str, span))
+            }
         }
+        // tuple struct (Error::Fmt(...))
         syn::Pat::TupleStruct(pat_ts) => {
             let segments = &pat_ts.path.segments;
+            if segments.is_empty() {
+                return None;
+            }
             let full_path_str =
                 segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
-            Some((full_path_str, &pat_ts.path))
+
+            use syn::spanned::Spanned;
+            if segments.len() == 1 {
+                let span = segments[0].ident.span();
+                Some((full_path_str, span))
+            } else {
+                let span = pat_ts.path.span();
+                Some((full_path_str, span))
+            }
         }
+        // struct pattern (Error::Fmt { .. })
         syn::Pat::Struct(pat_struct) => {
             let segments = &pat_struct.path.segments;
+            if segments.is_empty() {
+                return None;
+            }
             let full_path_str =
                 segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
-            Some((full_path_str, &pat_struct.path))
+
+            use syn::spanned::Spanned;
+            if segments.len() == 1 {
+                let span = segments[0].ident.span();
+                Some((full_path_str, span))
+            } else {
+                let span = pat_struct.path.span();
+                Some((full_path_str, span))
+            }
         }
         _ => None,
     }
